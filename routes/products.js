@@ -1,15 +1,17 @@
 const express = require('express');
 const router = express.Router();
+const { body, query, param, validationResult } = require('express-validator');
+const { authenticate, authorize } = require('../middleware/auth');
 
-// Public route — list products
+// Public: list products (safe — parameterized query)
 router.get('/', (req, res) => {
   const db = req.app.locals.db;
 
-  // VULNERABILITY: SQL injection via query parameter
   const category = req.query.category;
   let products;
   if (category) {
-    products = db.prepare(`SELECT * FROM products WHERE category = '${category}'`).all();
+    // FIX: Parameterized query
+    products = db.prepare('SELECT * FROM products WHERE category = ?').all(category);
   } else {
     products = db.prepare('SELECT * FROM products').all();
   }
@@ -17,46 +19,84 @@ router.get('/', (req, res) => {
   res.json(products);
 });
 
-// VULNERABILITY: No authentication — anyone can search with SQL injection
-router.get('/search', (req, res) => {
+// Public: search products (safe — parameterized query)
+router.get('/search', [
+  query('q').isString().trim().notEmpty().isLength({ max: 100 })
+], (req, res) => {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) {
+    return res.status(400).json({ errors: errors.array() });
+  }
+
   const db = req.app.locals.db;
   const q = req.query.q;
 
-  // VULNERABILITY: SQL injection via search query
-  const products = db.prepare(`SELECT * FROM products WHERE name LIKE '%${q}%' OR description LIKE '%${q}%'`).all();
+  // FIX: Parameterized LIKE query
+  const products = db.prepare(
+    'SELECT * FROM products WHERE name LIKE ? OR description LIKE ?'
+  ).all(`%${q}%`, `%${q}%`);
+
   res.json(products);
 });
 
-// VULNERABILITY: No authentication required to create products
-router.post('/', (req, res) => {
+// FIX: Only authenticated admins can create products
+router.post('/', authenticate, authorize('admin'), [
+  body('name').isString().trim().notEmpty().isLength({ max: 200 }).escape(),
+  body('description').optional().isString().trim().isLength({ max: 2000 }).escape(),
+  body('price').isFloat({ min: 0.01 }),
+  body('stock').isInt({ min: 0 }),
+  body('category').optional().isString().trim().escape(),
+  body('image_url').optional().isURL()
+], (req, res) => {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) {
+    return res.status(400).json({ errors: errors.array() });
+  }
+
   const db = req.app.locals.db;
   const { name, description, price, stock, category, image_url } = req.body;
 
-  // VULNERABILITY: No input validation — price could be negative, name could be XSS payload
   const result = db.prepare(
     'INSERT INTO products (name, description, price, stock, category, image_url) VALUES (?, ?, ?, ?, ?, ?)'
-  ).run(name, description, price, stock, category, image_url);
+  ).run(name, description || null, price, stock, category || null, image_url || null);
 
   res.status(201).json({ message: 'Product created', productId: result.lastInsertRowid });
 });
 
-// VULNERABILITY: No authentication required to update products
-router.put('/:id', (req, res) => {
+// FIX: Only authenticated admins can update products
+router.put('/:id', authenticate, authorize('admin'), [
+  param('id').isInt(),
+  body('name').isString().trim().notEmpty().isLength({ max: 200 }).escape(),
+  body('description').optional().isString().trim().isLength({ max: 2000 }).escape(),
+  body('price').isFloat({ min: 0.01 }),
+  body('stock').isInt({ min: 0 }),
+  body('category').optional().isString().trim().escape()
+], (req, res) => {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) {
+    return res.status(400).json({ errors: errors.array() });
+  }
+
   const db = req.app.locals.db;
   const { name, description, price, stock, category } = req.body;
 
-  // VULNERABILITY: No validation on price (could be set to negative)
   db.prepare(
     'UPDATE products SET name = ?, description = ?, price = ?, stock = ?, category = ? WHERE id = ?'
-  ).run(name, description, price, stock, category, req.params.id);
+  ).run(name, description || null, price, stock, category || null, req.params.id);
 
   res.json({ message: 'Product updated' });
 });
 
-// VULNERABILITY: No authentication required to delete products
-router.delete('/:id', (req, res) => {
-  const db = req.app.locals.db;
+// FIX: Only authenticated admins can delete products
+router.delete('/:id', authenticate, authorize('admin'), [
+  param('id').isInt()
+], (req, res) => {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) {
+    return res.status(400).json({ errors: errors.array() });
+  }
 
+  const db = req.app.locals.db;
   db.prepare('DELETE FROM products WHERE id = ?').run(req.params.id);
   res.json({ message: 'Product deleted' });
 });

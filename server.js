@@ -1,32 +1,53 @@
+require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
+const helmet = require('helmet');
+const rateLimit = require('express-rate-limit');
 const path = require('path');
 const { initDatabase } = require('./db');
-
-// VULNERABILITY: Hardcoded secret key (should use env variable)
-const JWT_SECRET = 'supersecretkey123';
-// VULNERABILITY: Hardcoded API key
-const STRIPE_API_KEY = 'sk_live_abc123456789';
-// VULNERABILITY: Hardcoded database credentials
-const DB_PASSWORD = 'admin123';
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// VULNERABILITY: Overly permissive CORS — allows any origin
+// FIX: Read secrets from environment variables, fail fast if missing
+const JWT_SECRET = process.env.JWT_SECRET;
+const STRIPE_API_KEY = process.env.STRIPE_API_KEY;
+
+if (!JWT_SECRET) {
+  console.error('FATAL: JWT_SECRET environment variable is not set');
+  process.exit(1);
+}
+
+// FIX: Use helmet for security headers
+app.use(helmet());
+
+// FIX: Restrict CORS to explicit allowed origins (configurable via env)
+const allowedOrigins = (process.env.ALLOWED_ORIGINS || 'http://localhost:3000').split(',');
 app.use(cors({
-  origin: '*',
+  origin(origin, callback) {
+    if (!origin || allowedOrigins.includes(origin)) {
+      callback(null, true);
+    } else {
+      callback(new Error('Not allowed by CORS'));
+    }
+  },
   credentials: true
 }));
 
-app.use(express.json());
+// FIX: Global rate limiter to mitigate brute-force / DDoS
+app.use(rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 100,
+  standardHeaders: true,
+  legacyHeaders: false
+}));
+
+app.use(express.json({ limit: '10kb' }));
 app.use(express.urlencoded({ extended: true }));
 app.use(express.static(path.join(__dirname, 'public')));
 
-// Initialize database
 const db = initDatabase();
 
-// Make db and secrets available to routes
 app.locals.db = db;
 app.locals.JWT_SECRET = JWT_SECRET;
 app.locals.STRIPE_API_KEY = STRIPE_API_KEY;
@@ -37,25 +58,13 @@ app.use('/api/products', require('./routes/products'));
 app.use('/api/orders', require('./routes/orders'));
 app.use('/api/admin', require('./routes/admin'));
 
-// VULNERABILITY: Debug endpoint exposed in production — leaks internal state
-app.get('/api/debug', (req, res) => {
-  res.json({
-    env: process.env,
-    dbPath: db.name,
-    secret: JWT_SECRET,
-    stripeKey: STRIPE_API_KEY,
-    memoryUsage: process.memoryUsage(),
-    uptime: process.uptime()
-  });
-});
+// FIX: Debug endpoint removed entirely.
+// In development, use proper logging/monitoring tools instead.
 
-// VULNERABILITY: Stack traces exposed to client
-app.use((err, req, res, next) => {
+// FIX: Error handler never exposes stack traces to clients
+app.use((err, req, res, _next) => {
   console.error(err.stack);
-  res.status(500).json({
-    error: err.message,
-    stack: err.stack
-  });
+  res.status(500).json({ error: 'Internal server error' });
 });
 
 app.listen(PORT, () => {
